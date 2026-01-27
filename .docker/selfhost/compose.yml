@@ -1,4 +1,9 @@
 name: affine
+
+networks:
+  dokploy-network:
+    external: true
+
 services:
   affine:
     image: ghcr.io/toeverything/affine:${AFFINE_REVISION:-stable}
@@ -23,6 +28,8 @@ services:
       - DATABASE_URL=postgresql://${DB_USERNAME}:${DB_PASSWORD}@postgres:5432/${DB_DATABASE:-affine}
       - AFFINE_INDEXER_ENABLED=false
     restart: unless-stopped
+    networks:
+      - dokploy-network
 
   affine_migration:
     image: ghcr.io/toeverything/affine:${AFFINE_REVISION:-stable}
@@ -43,6 +50,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    networks:
+      - dokploy-network
 
   redis:
     image: redis
@@ -53,6 +62,8 @@ services:
       timeout: 5s
       retries: 5
     restart: unless-stopped
+    networks:
+      - dokploy-network
 
   postgres:
     image: pgvector/pgvector:pg16
@@ -74,3 +85,5 @@ services:
       timeout: 5s
       retries: 5
     restart: unless-stopped
+    networks:
+      - dokploy-network
