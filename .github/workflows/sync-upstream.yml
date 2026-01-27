@@ -1,0 +1,140 @@
+name: Sync with Upstream
+
+on:
+  schedule:
+    # Runs on the 1st of every month at 09:00 UTC
+    - cron: '0 9 1 * *'
+  workflow_dispatch: # Allow manual trigger
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Add upstream remote
+        run: git remote add upstream https://github.com/toeverything/AFFiNE.git
+
+      - name: Fetch upstream
+        run: git fetch upstream
+
+      - name: Check if upstream has new commits
+        id: check_upstream
+        run: |
+          BEHIND=$(git rev-list --count HEAD..upstream/canary)
+          echo "commits_behind=$BEHIND" >> $GITHUB_OUTPUT
+          if [ "$BEHIND" -gt 0 ]; then
+            echo "needs_sync=true" >> $GITHUB_OUTPUT
+          else
+            echo "needs_sync=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Attempt merge
+        if: steps.check_upstream.outputs.needs_sync == 'true'
+        id: merge
+        run: |
+          if git merge upstream/canary -m "Merge upstream/canary"; then
+            echo "merge_status=success" >> $GITHUB_OUTPUT
+          else
+            echo "merge_status=conflict" >> $GITHUB_OUTPUT
+            # Abort the failed merge
+            git merge --abort
+          fi
+
+      - name: Handle conflict - use upstream then re-apply our changes
+        if: steps.merge.outputs.merge_status == 'conflict'
+        run: |
+          echo "Merge conflict detected. Taking upstream version and re-applying our customizations..."
+
+          # Reset to upstream
+          git reset --hard upstream/canary
+
+          # Re-apply our dokploy-network patch
+          # This Python script is more reliable than sed
+          python3 << 'EOF'
+          import re
+
+          with open('.docker/selfhost/compose.yml', 'r') as f:
+              content = f.read()
+
+          # Check if already has dokploy-network
+          if 'dokploy-network' in content:
+              print("dokploy-network already present, skipping")
+              exit(0)
+
+          # Add networks section after 'name: affine'
+          networks_block = '''
+
+          networks:
+            dokploy-network:
+              external: true'''
+
+          content = re.sub(
+              r'^(name: affine)$',
+              r'\1' + networks_block,
+              content,
+              flags=re.MULTILINE
+          )
+
+          # Add networks to each service (before the next service or end of file)
+          services = ['affine', 'affine_migration', 'redis', 'postgres']
+
+          for service in services:
+              # Find the service block and add networks before the next service or EOF
+              pattern = rf'(^  {service}:.*?)(restart: unless-stopped|service_healthy)(\n)'
+
+              def add_network(match):
+                  # Check if this service already has networks
+                  if 'networks:' in match.group(0):
+                      return match.group(0)
+                  return match.group(1) + match.group(2) + match.group(3) + '    networks:\n      - dokploy-network\n'
+
+              content = re.sub(pattern, add_network, content, flags=re.MULTILINE | re.DOTALL)
+
+          with open('.docker/selfhost/compose.yml', 'w') as f:
+              f.write(content)
+
+          print("Successfully re-applied dokploy-network configuration")
+          EOF
+
+          git add .docker/selfhost/compose.yml
+          git commit -m "Merge upstream/canary with dokploy-network fix preserved"
+
+      - name: Create Pull Request
+        if: steps.check_upstream.outputs.needs_sync == 'true'
+        uses: peter-evans/create-pull-request@v6
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          branch: sync/upstream-${{ github.run_number }}
+          base: canary
+          title: "chore: sync with upstream AFFiNE"
+          body: |
+            ## Automated Upstream Sync
+
+            This PR syncs our fork with the latest changes from [upstream AFFiNE](https://github.com/toeverything/AFFiNE).
+
+            **Commits behind upstream:** ${{ steps.check_upstream.outputs.commits_behind }}
+            **Merge status:** ${{ steps.merge.outputs.merge_status || 'success' }}
+
+            ${{ steps.merge.outputs.merge_status == 'conflict' && '⚠️ There was a merge conflict. Upstream changes were taken and our dokploy-network configuration was re-applied automatically.' || '✅ Clean merge with no conflicts.' }}
+
+            ### Our customizations preserved:
+            - `dokploy-network` external network declaration
+            - All services attached to `dokploy-network`
+
+            Please review the changes before merging.
+
+            ---
+            *This PR was automatically created by the sync-upstream workflow.*
+          labels: |
+            automated
+            upstream-sync
