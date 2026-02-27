@@ -107,7 +107,24 @@ jobs:
           EOF
 
           git add .docker/selfhost/compose.yml
-          git commit -m "Merge upstream/canary with dokploy-network fix preserved"
+          if ! git diff --cached --quiet; then
+            git commit -m "Merge upstream/canary with dokploy-network fix preserved"
+          fi
+
+      - name: Disable upstream workflows in fork
+        if: steps.check_upstream.outputs.needs_sync == 'true'
+        run: |
+          mkdir -p .github/workflows-disabled
+          find .github/workflows -maxdepth 1 -type f \( -name '*.yml' -o -name '*.yaml' \) | while read -r workflow; do
+            base="$(basename "$workflow")"
+            if [ "$base" != "sync-upstream.yml" ]; then
+              mv "$workflow" ".github/workflows-disabled/$base"
+            fi
+          done
+          git add .github/workflows .github/workflows-disabled
+          if ! git diff --cached --quiet; then
+            git commit -m "chore(ci): disable upstream workflows in fork"
+          fi
 
       - name: Create Pull Request
         if: steps.check_upstream.outputs.needs_sync == 'true'
